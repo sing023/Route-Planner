@@ -1,0 +1,40 @@
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+out/
+target/
+*.log
+
+# Maven
+/logs
+/target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Eclipse (if imported)
+.classpath
+.project
+.settings/
+
+# VS Code (if used)
+.vscode/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# Other
+*.swp
+*.bak
+*.tmp
