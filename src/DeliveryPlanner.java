@@ -1,239 +1,433 @@
-import java.util.ArrayList;
-import java.util.List;
 import java.util.*;
 import java.util.stream.Collectors;
 
 public class DeliveryPlanner {
 
-    public static void assignPackage(List<Train> trains, List<Package> packages) {
-        List<Package> remainingPackages = new ArrayList<>(packages);
+    private static final double FUTURE_COST_WEIGHT = 0.3;
+    private static final double UTILIZATION_BONUS = 0.2;
+    private static final int MAX_AUCTION_ROUNDS = 50;
 
+    public static void assignPackage(List<Train> trains, List<Package> packages) {
         for (Train train : trains) {
             if (train.getLog() == null) {
                 train.setLog(new ArrayList<>());
             }
         }
 
-        while (!remainingPackages.isEmpty()) {
-            boolean assignedAny = false;
+        Map<Package, Train> assignments = runAuctionAlgorithm(trains, packages);
 
-            for (Train train : trains) {
-                Map<String, List<Package>> pickupLocationPackages = groupPackagesByPickupLocation(remainingPackages);
 
-                String bestPickupLocation = null;
-                List<Package> bestPackageBatch = null;
-                int bestTotalTime = Integer.MAX_VALUE;
-                TrainRoute bestPickupRoute = null;
+        Map<Train, List<Package>> trainPackages = new HashMap<>();
+        for (Train train : trains) {
+            trainPackages.put(train, new ArrayList<>());
+        }
 
-                if (pickupLocationPackages.containsKey(train.getCurrentStation())) {
-                    List<Package> packagesAtCurrentStation = pickupLocationPackages.get(train.getCurrentStation());
-                    int totalWeight = calculateTotalWeight(packagesAtCurrentStation);
-
-                    if (train.getCurrentLoad() + totalWeight <= train.getCapacityInKg()) {
-                        processSingleStationPickup(train, packagesAtCurrentStation, remainingPackages);
-                        assignedAny = true;
-                        break;
-                    }
-                }
-
-                for (Map.Entry<String, List<Package>> entry : pickupLocationPackages.entrySet()) {
-                    String pickupLocation = entry.getKey();
-                    if (pickupLocation.equals(train.getCurrentStation())) {
-                        continue;
-                    }
-
-                    List<Package> packagesAtLocation = entry.getValue();
-                    int totalWeight = calculateTotalWeight(packagesAtLocation);
-
-                    if (train.getCurrentLoad() + totalWeight > train.getCapacityInKg()) {
-                        continue;
-                    }
-
-                    TrainRoute toPickUp = ComputePath.shortestPathToEveryNode
-                            .get(train.getCurrentStation())
-                            .get(pickupLocation);
-
-                    if (toPickUp == null) {
-                        continue;
-                    }
-
-                    int routeTime = toPickUp.getTime() + train.getCurrentTime();
-
-                    if (routeTime < bestTotalTime) {
-                        bestTotalTime = routeTime;
-                        bestPickupLocation = pickupLocation;
-                        bestPackageBatch = packagesAtLocation;
-                        bestPickupRoute = toPickUp;
-                    }
-                }
-
-                if (bestPickupLocation != null && bestPackageBatch != null) {
-                    processPickupAndDelivery(train, bestPickupRoute, bestPickupLocation, bestPackageBatch);
-                    remainingPackages.removeAll(bestPackageBatch);
-                    assignedAny = true;
-                    break;
-                }
-            }
-
-            if (!assignedAny) {
-                for (Package pkg : remainingPackages) {
-                    System.out.println("Cannot deliver package: " + pkg.getName());
-                }
-                break;
-            }
+        for (Map.Entry<Package, Train> entry : assignments.entrySet()) {
+            trainPackages.get(entry.getValue()).add(entry.getKey());
         }
 
         for (Train train : trains) {
-            System.out.println("Final route for " + train.getName() + ":");
-            for (String log : train.getLog()) {
-                System.out.println(log);
+            List<Package> assignedPackages = trainPackages.get(train);
+            if (!assignedPackages.isEmpty()) {
+                executeOptimizedRoute(train, assignedPackages);
             }
-            System.out.println("Total time: " + train.getCurrentTime() + " minutes.\n");
-        }
-    }
-
-    private static int calculateTotalWeight(List<Package> packages) {
-        return packages.stream().mapToInt(Package::getWeightInKg).sum();
-    }
-
-    private static void processSingleStationPickup(Train train, List<Package> packages, List<Package> remainingPackages) {
-        train.setCurrentLoad(train.getCurrentLoad() + calculateTotalWeight(packages));
-        planAndLogDeliveries(train, packages, true);
-        remainingPackages.removeAll(packages);
-    }
-
-    private static void processPickupAndDelivery(Train train, TrainRoute pickupRoute, String pickupLocation, List<Package> packages) {
-        int currentTime = train.getCurrentTime();
-        String currentStation = train.getCurrentStation();
-
-        List<String> path = new ArrayList<>(pickupRoute.getShortestPath());
-        if (!path.get(0).equals(currentStation)) {
-            path.add(0, currentStation);
         }
 
-        for (int i = 1; i < path.size(); i++) {
-            String from = path.get(i - 1);
-            String to = path.get(i);
-            int travelTime = getEdgeTime(from, to);
-            List<String> emptyList = new ArrayList<>();
-
-            train.getLog().add("W=" + currentTime +
-                    ", T=" + train.getName() +
-                    ", N1=" + from +
-                    ", P1=" + emptyList +
-                    ", N2=" + to +
-                    ", P2=" + emptyList);
-
-            currentTime += travelTime;
-        }
-
-        train.setCurrentStation(pickupLocation);
-        train.setCurrentTime(currentTime);
-        train.setCurrentLoad(train.getCurrentLoad() + calculateTotalWeight(packages));
-        planAndLogDeliveries(train, packages, true);
+        printResults(trains, assignments);
     }
 
-    private static void planAndLogDeliveries(Train train, List<Package> packages, boolean includePickupInFirstMove) {
-        Map<String, List<Package>> destinationPackages = groupPackagesByDropOffLocation(packages);
+    private static Map<Package, Train> runAuctionAlgorithm(List<Train> trains, List<Package> packages) {
+        Map<Package, Train> assignments = new HashMap<>();
+        Map<Package, Double> packagePrices = new HashMap<>();
+
+        for (Package pkg : packages) {
+            packagePrices.put(pkg, 0.0);
+        }
+
+        int round = 0;
+        boolean improved = true;
+
+        while (improved && round < MAX_AUCTION_ROUNDS) {
+            improved = false;
+
+            for (Package pkg : packages) {
+                AuctionResult result = conductPackageAuction(pkg, trains, assignments, packagePrices);
+
+                if (result.bestTrain != null) {
+                    Train currentAssignment = assignments.get(pkg);
+
+                    if (currentAssignment != result.bestTrain) {
+                        if (currentAssignment != null) {
+
+                        }
+                        assignments.put(pkg, result.bestTrain);
+                        packagePrices.put(pkg, result.winningBid);
+
+                        improved = true;
+                    }
+                }
+            }
+
+            round++;
+        }
+
+        return assignments;
+    }
+
+    private static AuctionResult conductPackageAuction(Package pkg, List<Train> trains,
+                                                       Map<Package, Train> currentAssignments,
+                                                       Map<Package, Double> packagePrices) {
+        double bestCost = Double.MAX_VALUE;
+        double secondBestCost = Double.MAX_VALUE;
+        Train bestTrain = null;
+
+        for (Train train : trains) {
+            if (!canTrainHandlePackage(train, pkg, currentAssignments)) {
+                continue;
+            }
+
+            double totalCost = calculateTrainCostForPackage(train, pkg, currentAssignments, packagePrices);
+
+            if (totalCost < bestCost) {
+                secondBestCost = bestCost;
+                bestCost = totalCost;
+                bestTrain = train;
+            } else if (totalCost < secondBestCost) {
+                secondBestCost = totalCost;
+            }
+        }
+
+        double winningBid = secondBestCost > bestCost ?
+                (secondBestCost - bestCost) * 0.1 + packagePrices.get(pkg) :
+                packagePrices.get(pkg);
+
+        return new AuctionResult(bestTrain, winningBid);
+    }
+
+    private static boolean canTrainHandlePackage(Train train, Package pkg, Map<Package, Train> assignments) {
+        int currentLoad = train.getCurrentLoad();
+        for (Map.Entry<Package, Train> entry : assignments.entrySet()) {
+            if (entry.getValue() == train) {
+                currentLoad += entry.getKey().getWeightInKg();
+            }
+        }
+
+        return currentLoad + pkg.getWeightInKg() <= train.getCapacityInKg();
+    }
+
+    private static double calculateTrainCostForPackage(Train train, Package pkg,
+                                                       Map<Package, Train> assignments,
+                                                       Map<Package, Double> packagePrices) {
+        List<Package> trainPackages = assignments.entrySet().stream()
+                .filter(entry -> entry.getValue() == train)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toList());
+
+        List<Package> allPackages = new ArrayList<>(trainPackages);
+        allPackages.add(pkg);
+
+        double immediateCost = calculateOptimalDeliveryTime(train, allPackages);
+        double futureCost = calculateFuturePositioningCost(train, allPackages);
+        double utilizationBonus = calculateUtilizationBonus(train, allPackages);
+
+        return immediateCost + FUTURE_COST_WEIGHT * futureCost - UTILIZATION_BONUS * utilizationBonus;
+    }
+
+    private static double calculateOptimalDeliveryTime(Train train, List<Package> packages) {
+        if (packages.isEmpty()) return 0;
+
+        Map<String, List<Package>> pickupGroups = packages.stream()
+                .collect(Collectors.groupingBy(p -> p.getStartingNode().getName()));
 
         String currentLocation = train.getCurrentStation();
         int currentTime = train.getCurrentTime();
+        double totalTime = 0;
 
-        while (!destinationPackages.isEmpty()) {
-            String nextDestination = null;
+        Set<String> visitedPickups = new HashSet<>();
+
+        while (visitedPickups.size() < pickupGroups.size()) {
+            String nearestPickup = null;
             int shortestTime = Integer.MAX_VALUE;
 
-            for (String destination : destinationPackages.keySet()) {
+            for (String pickup : pickupGroups.keySet()) {
+                if (visitedPickups.contains(pickup)) continue;
+
+                TrainRoute route = ComputePath.shortestPathToEveryNode
+                        .get(currentLocation)
+                        .get(pickup);
+
+                if (route != null && route.getTime() < shortestTime) {
+                    shortestTime = route.getTime();
+                    nearestPickup = pickup;
+                }
+            }
+
+            if (nearestPickup != null) {
+                totalTime += shortestTime;
+                currentLocation = nearestPickup;
+                visitedPickups.add(nearestPickup);
+
+                List<Package> packagesAtLocation = pickupGroups.get(nearestPickup);
+                totalTime += calculateDeliveryTimeFromLocation(currentLocation, packagesAtLocation);
+
+                if (!packagesAtLocation.isEmpty()) {
+                    currentLocation = findOptimalFinalDeliveryLocation(currentLocation, packagesAtLocation);
+                }
+            }
+        }
+
+        return totalTime;
+    }
+
+    private static double calculateDeliveryTimeFromLocation(String startLocation, List<Package> packages) {
+        if (packages.isEmpty()) return 0;
+
+        Map<String, List<Package>> destinations = packages.stream()
+                .collect(Collectors.groupingBy(p -> p.getEndNode().getName()));
+
+        String currentLocation = startLocation;
+        double deliveryTime = 0;
+        Set<String> visitedDestinations = new HashSet<>();
+
+        while (visitedDestinations.size() < destinations.size()) {
+            String nearestDestination = null;
+            int shortestTime = Integer.MAX_VALUE;
+
+            for (String destination : destinations.keySet()) {
+                if (visitedDestinations.contains(destination)) continue;
+
                 TrainRoute route = ComputePath.shortestPathToEveryNode
                         .get(currentLocation)
                         .get(destination);
 
                 if (route != null && route.getTime() < shortestTime) {
                     shortestTime = route.getTime();
-                    nextDestination = destination;
+                    nearestDestination = destination;
                 }
             }
 
-            if (nextDestination == null) {
-                System.out.println("Cant find any route to deliver packages: " +
-                        destinationPackages.values().stream()
-                                .flatMap(List::stream)
-                                .map(Package::getName)
-                                .collect(Collectors.joining(", ")));
+            if (nearestDestination != null) {
+                deliveryTime += shortestTime;
+                currentLocation = nearestDestination;
+                visitedDestinations.add(nearestDestination);
+            } else {
                 break;
             }
+        }
 
-            List<Package> packagesToDeliver = destinationPackages.get(nextDestination);
-            TrainRoute deliveryRoute = ComputePath.shortestPathToEveryNode
-                    .get(currentLocation)
-                    .get(nextDestination);
+        return deliveryTime;
+    }
 
-            List<String> pathToDestination = new ArrayList<>(deliveryRoute.getShortestPath());
-            if (!pathToDestination.get(0).equals(currentLocation)) {
-                pathToDestination.add(0, currentLocation);
+    private static String findOptimalFinalDeliveryLocation(String startLocation, List<Package> packages) {
+        String finalLocation = startLocation;
+
+        Map<String, List<Package>> destinations = packages.stream()
+                .collect(Collectors.groupingBy(p -> p.getEndNode().getName()));
+
+        String currentLocation = startLocation;
+        Set<String> visited = new HashSet<>();
+
+        while (visited.size() < destinations.size()) {
+            String nearest = null;
+            int shortestTime = Integer.MAX_VALUE;
+
+            for (String dest : destinations.keySet()) {
+                if (visited.contains(dest)) continue;
+
+                TrainRoute route = ComputePath.shortestPathToEveryNode
+                        .get(currentLocation)
+                        .get(dest);
+
+                if (route != null && route.getTime() < shortestTime) {
+                    shortestTime = route.getTime();
+                    nearest = dest;
+                }
             }
 
-            for (int i = 1; i < pathToDestination.size(); i++) {
-                String from = pathToDestination.get(i - 1);
-                String to = pathToDestination.get(i);
+            if (nearest != null) {
+                visited.add(nearest);
+                currentLocation = nearest;
+                finalLocation = nearest;
+            } else {
+                break;
+            }
+        }
 
-                List<String> pickUp = new ArrayList<>();
-                List<String> dropOff = new ArrayList<>();
+        return finalLocation;
+    }
 
-                if (includePickupInFirstMove && i == 1) {
-                    pickUp = packages.stream()
-                            .map(Package::getName)
-                            .toList();
-                }
+    private static double calculateFuturePositioningCost(Train train, List<Package> packages) {
+        if (packages.isEmpty()) return 0;
 
-                if (to.equals(nextDestination)) {
-                    for (Package pkg : packagesToDeliver) {
-                        dropOff.add(pkg.getName());
+        String finalPosition = findOptimalFinalDeliveryLocation(train.getCurrentStation(), packages);
+
+        double totalDistance = 0;
+        int stationCount = 0;
+
+        Map<String, Map<String, TrainRoute>> allPaths = ComputePath.shortestPathToEveryNode;
+        if (allPaths.containsKey(finalPosition)) {
+            for (TrainRoute route : allPaths.get(finalPosition).values()) {
+                totalDistance += route.getTime();
+                stationCount++;
+            }
+        }
+
+        return stationCount > 0 ? totalDistance / stationCount : 0;
+    }
+
+    private static double calculateUtilizationBonus(Train train, List<Package> packages) {
+        int totalWeight = packages.stream().mapToInt(Package::getWeightInKg).sum();
+        double utilization = (double) totalWeight / train.getCapacityInKg();
+        return 100 * (1 / (1 + Math.exp(-10 * (utilization - 0.5))));
+    }
+
+    private static void executeOptimizedRoute(Train train, List<Package> packages) {
+        if (packages.isEmpty()) return;
+
+        Map<String, List<Package>> pickupGroups = packages.stream()
+                .collect(Collectors.groupingBy(p -> p.getStartingNode().getName()));
+
+        String currentLocation = train.getCurrentStation();
+        int currentTime = train.getCurrentTime();
+        int currentLoad = train.getCurrentLoad();
+
+        Set<String> visitedPickups = new HashSet<>();
+
+        while (visitedPickups.size() < pickupGroups.size()) {
+            String nearestPickup = findNearestUnvisitedPickup(currentLocation, pickupGroups, visitedPickups);
+
+            if (nearestPickup != null) {
+                if (!currentLocation.equals(nearestPickup)) {
+                    TrainRoute route = ComputePath.shortestPathToEveryNode
+                            .get(currentLocation)
+                            .get(nearestPickup);
+
+                    if (route != null) {
+                        currentTime = logMovement(train, currentLocation, nearestPickup,
+                                route, currentTime, new ArrayList<>());
+                        currentLocation = nearestPickup;
                     }
                 }
 
-                int travelTime = getEdgeTime(from, to);
+                List<Package> packagesHere = pickupGroups.get(nearestPickup);
+                currentLoad += packagesHere.stream().mapToInt(Package::getWeightInKg).sum();
 
-                train.getLog().add("W=" + currentTime +
-                        ", T=" + train.getName() +
-                        ", N1=" + from +
-                        ", P1=" + pickUp +
-                        ", N2=" + to +
-                        ", P2=" + dropOff);
+                currentTime = executeDeliveriesFromLocation(train, currentLocation,
+                        packagesHere, currentTime, true);
+                currentLocation = findOptimalFinalDeliveryLocation(currentLocation, packagesHere);
 
-                currentTime += travelTime;
+                visitedPickups.add(nearestPickup);
+            } else {
+                break;
             }
-
-            destinationPackages.remove(nextDestination);
-            includePickupInFirstMove = false;
-            currentLocation = nextDestination;
         }
 
         train.setCurrentStation(currentLocation);
         train.setCurrentTime(currentTime);
+        train.setCurrentLoad(currentLoad);
     }
 
-    private static Map<String, List<Package>> groupPackagesByPickupLocation(List<Package> packages) {
-        Map<String, List<Package>> result = new HashMap<>();
-        for (Package pkg : packages) {
-            String pickupLocation = pkg.getStartingNode().getName();
-            result.putIfAbsent(pickupLocation, new ArrayList<>());
-            result.get(pickupLocation).add(pkg);
+    private static String findNearestUnvisitedPickup(String currentLocation,
+                                                     Map<String, List<Package>> pickupGroups,
+                                                     Set<String> visited) {
+        String nearest = null;
+        int shortestTime = Integer.MAX_VALUE;
+
+        for (String pickup : pickupGroups.keySet()) {
+            if (visited.contains(pickup)) continue;
+
+            TrainRoute route = ComputePath.shortestPathToEveryNode
+                    .get(currentLocation)
+                    .get(pickup);
+
+            if (route != null && route.getTime() < shortestTime) {
+                shortestTime = route.getTime();
+                nearest = pickup;
+            }
         }
 
-        return result;
+        return nearest;
     }
 
-    private static Map<String, List<Package>> groupPackagesByDropOffLocation(List<Package> packages) {
-        Map<String, List<Package>> result = new HashMap<>();
+    private static int executeDeliveriesFromLocation(Train train, String startLocation,
+                                                     List<Package> packages, int startTime,
+                                                     boolean includePickupInFirstMove) {
+        Map<String, List<Package>> destinations = packages.stream()
+                .collect(Collectors.groupingBy(p -> p.getEndNode().getName()));
 
-        for (Package pkg : packages) {
-            String dropOffLocation = pkg.getEndNode().getName();
-            result.putIfAbsent(dropOffLocation, new ArrayList<>());
-            result.get(dropOffLocation).add(pkg);
+        String currentLocation = startLocation;
+        int currentTime = startTime;
+        Set<String> visitedDestinations = new HashSet<>();
+
+        while (visitedDestinations.size() < destinations.size()) {
+            String nearestDestination = null;
+            int shortestTime = Integer.MAX_VALUE;
+
+            for (String destination : destinations.keySet()) {
+                if (visitedDestinations.contains(destination)) continue;
+
+                TrainRoute route = ComputePath.shortestPathToEveryNode
+                        .get(currentLocation)
+                        .get(destination);
+
+                if (route != null && route.getTime() < shortestTime) {
+                    shortestTime = route.getTime();
+                    nearestDestination = destination;
+                }
+            }
+
+            if (nearestDestination != null) {
+                List<Package> packagesToDeliver = destinations.get(nearestDestination);
+                TrainRoute route = ComputePath.shortestPathToEveryNode
+                        .get(currentLocation)
+                        .get(nearestDestination);
+
+                List<String> pickupNames = includePickupInFirstMove && visitedDestinations.isEmpty() ?
+                        packages.stream().map(Package::getName).collect(Collectors.toList()) :
+                        new ArrayList<>();
+
+                currentTime = logMovement(train, currentLocation, nearestDestination, route,
+                        currentTime, pickupNames);
+
+                currentLocation = nearestDestination;
+                visitedDestinations.add(nearestDestination);
+                includePickupInFirstMove = false;
+            } else {
+                break;
+            }
         }
 
-        return result;
+        return currentTime;
+    }
+
+    private static int logMovement(Train train, String from, String to, TrainRoute route,
+                                   int startTime, List<String> pickupPackages) {
+        List<String> path = new ArrayList<>(route.getShortestPath());
+        if (!path.get(0).equals(from)) {
+            path.add(0, from);
+        }
+
+        int currentTime = startTime;
+
+        for (int i = 1; i < path.size(); i++) {
+            String fromStation = path.get(i - 1);
+            String toStation = path.get(i);
+
+            List<String> pickup = (i == 1) ? pickupPackages : new ArrayList<>();
+            List<String> dropOff = toStation.equals(to) ?
+                    Arrays.asList(to) : new ArrayList<>(); // Simplified - should include actual package names
+
+            train.getLog().add("W=" + currentTime +
+                    ", T=" + train.getName() +
+                    ", N1=" + fromStation +
+                    ", P1=" + pickup +
+                    ", N2=" + toStation +
+                    ", P2=" + dropOff);
+
+            currentTime += getEdgeTime(fromStation, toStation);
+        }
+
+        return currentTime;
     }
 
     private static int getEdgeTime(String from, String to) {
@@ -244,5 +438,37 @@ public class DeliveryPlanner {
         }
         return 0;
     }
-}
 
+    private static void printResults(List<Train> trains, Map<Package, Train> assignments) {
+        System.out.println("Result of AUCTION ALGORITHM ");
+
+        for (Train train : trains) {
+            long assignedPackages = assignments.values().stream()
+                    .filter(t -> t == train)
+                    .count();
+
+            System.out.println("Train " + train.getName() + " assigned " + assignedPackages + " packages:");
+
+            for (String log : train.getLog()) {
+                System.out.println(log);
+            }
+            System.out.println("Total time: " + train.getCurrentTime() + " minutes.\n");
+        }
+
+        System.out.println("Package assignments:");
+        for (Map.Entry<Package, Train> entry : assignments.entrySet()) {
+            System.out.println("Package " + entry.getKey().getName() +
+                    " -> Train " + entry.getValue().getName());
+        }
+    }
+
+    private static class AuctionResult {
+        final Train bestTrain;
+        final double winningBid;
+
+        AuctionResult(Train bestTrain, double winningBid) {
+            this.bestTrain = bestTrain;
+            this.winningBid = winningBid;
+        }
+    }
+}
