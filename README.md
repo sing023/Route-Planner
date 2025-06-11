@@ -22,7 +22,7 @@ The goal is to deliver **all packages to their respective destinations** in the 
 
 Your program will receive structured input in the following format:
 
-1. **Nodes**  
+1. **Nodes**
    ```
    [number_of_nodes]
    NodeName1
@@ -30,21 +30,21 @@ Your program will receive structured input in the following format:
    ...
    ```
 
-2. **Edges**  
+2. **Edges**
    ```
    [number_of_edges]
    EdgeName,Node1,Node2,TravelTimeInMinutes
    ...
    ```
 
-3. **Packages**  
+3. **Packages**
    ```
    [number_of_packages]
    PackageName,WeightInKg,StartNode,DestinationNode
    ...
    ```
 
-4. **Trains**  
+4. **Trains**
    ```
    [number_of_trains]
    TrainName,CapacityInKg,StartingNode
@@ -99,9 +99,14 @@ Q1,6,B
 
 **Output**
 ```
-W=0, T=Q1, N1=B, P1=[], N2=A, P2=[]
+Train Q1 assigned 1 packages:
+W=0, T=Q1, N1=B, P1=[], N2=A, P2=[A]
 W=30, T=Q1, N1=A, P1=[K1], N2=B, P2=[]
-W=60, T=Q1, N1=B, P1=[], N2=C, P2=[K1]
+W=60, T=Q1, N1=B, P1=[], N2=C, P2=[C]
+Total time: 70 minutes.
+
+Package assignments:
+Package K1 -> Train Q1
 ```
 
 📦 Package `K1` was successfully delivered from `A` to `C` in **70 minutes**.
@@ -110,8 +115,8 @@ W=60, T=Q1, N1=B, P1=[], N2=C, P2=[K1]
 
 ## 🚀 Goals
 
-- ✅ **Correctness** – ensure all deliveries complete under constraints  
-- 🔄 **Optimization** – minimize total delivery time  
+- ✅ **Correctness** – ensure all deliveries complete under constraints
+- 🔄 **Optimization** – minimize total delivery time
 - 🔐 **Scalability** – handle large networks, multiple trains, and overlapping deliveries
 
 ---
@@ -135,5 +140,59 @@ W=60, T=Q1, N1=B, P1=[], N2=C, P2=[K1]
 ## 🤝 Contribution
 
 Contributions and optimization ideas are welcome! Feel free to fork, test with your own scenarios, or suggest improvements to the scheduling strategy.
+
+---
+---
+
+## 🔁 Additional Test Example
+
+Below is a more complex test case to demonstrate handling multiple trains and packages across an extended network.
+
+### Uncomment out line 15-45 in Main.java and insert the code below
+### 📥 Setup Code
+```java
+ComputePath.addEdge("E1","A", "B", 30);
+ComputePath.addEdge("E2","B", "C", 10);
+ComputePath.addEdge("E3","C", "D", 20);
+ComputePath.addEdge("E4","A", "C", 50);
+
+ComputePath.computeAllShortestPath();
+
+List<Package> deliveries = List.of(
+    new Package("K1", 10, new Node("A"), new Node("C")),
+    new Package("K2", 20, new Node("B"), new Node("D")),
+    new Package("K3", 10, new Node("A"), new Node("D"))
+);
+
+List<Train> trains = List.of(
+    new Train("Q1", 30, "B"),
+    new Train("Q2", 50, "D")
+);
+```
+
+### 📤 Expected Output (example format)
+```
+Train Q1 assigned 2 packages:
+W=0, T=Q1, N1=B, P1=[], N2=A, P2=[A]
+W=30, T=Q1, N1=A, P1=[K1, K3], N2=B, P2=[]
+W=60, T=Q1, N1=B, P1=[], N2=C, P2=[C]
+W=70, T=Q1, N1=C, P1=[], N2=D, P2=[D]
+Total time: 90 minutes.
+
+Train Q2 assigned 1 packages:
+W=0, T=Q2, N1=D, P1=[], N2=C, P2=[]
+W=20, T=Q2, N1=C, P1=[], N2=B, P2=[B]
+W=30, T=Q2, N1=B, P1=[K2], N2=C, P2=[]
+W=40, T=Q2, N1=C, P1=[], N2=D, P2=[D]
+Total time: 60 minutes.
+
+Package assignments:
+Package K2 -> Train Q2
+Package K3 -> Train Q1
+Package K1 -> Train Q1
+
+```
+
+This example shows two trains collaborating to fulfill three package deliveries with minimal total time.
 
 ---
